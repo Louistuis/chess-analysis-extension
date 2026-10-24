@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Chess.com Position Reader",
+  "version": "1.0.0",
+  "description": "Shows Stockfish analysis (top lines as arrows, evaluation, opening) over the chess.com board. For analysis and practice only.",
+  "permissions": ["offscreen", "storage"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "action": {
+    "default_title": "Read chess.com position",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.chess.com/*"
+      ],
+      "js": [
+        "src/chess-reader.js",
+        "src/overlay.js",
+        "src/settings.js",
+        "vendor/chess/chess.js",
+        "src/san.js",
+        "src/openings-data.js",
+        "src/openings.js",
+        "src/history.js",
+        "src/panel.js",
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

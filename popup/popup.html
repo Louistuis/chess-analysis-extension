@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Chess.com Position Reader</title>
+    <style>
+      body { font-family: system-ui, sans-serif; width: 340px; margin: 12px; font-size: 13px; }
+      h1 { font-size: 15px; margin: 0 0 8px; }
+      h2 { font-size: 13px; margin: 14px 0 6px; }
+      #fen { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; background: #f4f4f4; padding: 8px; border-radius: 4px; min-height: 2.5em; }
+      #status { color: #666; margin: 8px 0; min-height: 1.2em; }
+      button { font-size: 13px; padding: 4px 10px; margin-right: 6px; }
+      .setting { display: flex; align-items: center; justify-content: space-between; margin: 6px 0; }
+      .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
+      .switch input { opacity: 0; width: 0; height: 0; }
+      .slider { position: absolute; inset: 0; background: #bbb; border-radius: 20px; cursor: pointer; transition: background 0.2s; }
+      .slider::before { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
+      .switch input:checked + .slider { background: #3b82f6; }
+      .switch input:checked + .slider::before { transform: translateX(16px); }
+      input[type="range"] { width: 180px; }
+      .note { color: #7a4b00; background: #fff6e0; border-radius: 4px; padding: 8px; margin-top: 12px; line-height: 1.4; }
+    </style>
+  </head>
+  <body>
+    <h1>Current position</h1>
+    <div id="fen"></div>
+    <div id="status"></div>
+    <button id="read" type="button">Read again</button>
+    <button id="copy" type="button">Copy FEN</button>
+
+    <h2>Suggestions</h2>
+    <div class="setting">
+      <span>Show suggested move</span>
+      <label class="switch">
+        <input id="enabled" type="checkbox" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="setting">
+      <span>Search depth: <strong id="depth-value"></strong></span>
+      <input id="depth" type="range" />
+    </div>
+    <div class="setting">
+      <span>Lines shown</span>
+      <select id="lines">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+        <option value="5">5</option>
+      </select>
+    </div>
+
+    <p class="note">
+      For analysis and practice only, not live rated games. Using engine help in a rated game breaks chess.com's fair play rules.
+    </p>
+
+    <script src="../src/settings.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

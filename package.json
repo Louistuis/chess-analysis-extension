@@ -1,0 +1,8 @@
+{
+  "name": "chess-extension",
+  "version": "1.0.0",
+  "license": "GPL-3.0",
+  "private": true,
+  "scripts": { "test": "node --test test/" },
+  "devDependencies": { "jsdom": "^26.0.0" }
+}

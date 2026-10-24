@@ -1,0 +1,15 @@
+node_modules/
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors and logs
+.vscode/
+.idea/
+*.log
