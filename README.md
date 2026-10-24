@@ -64,11 +64,12 @@ The tests use `node:test` and jsdom. They include tests that run the real vendor
 | `popup/` | The popup: FEN display, copy button, on/off switch, depth slider, lines selector and the note. |
 | `test/` | Unit and end-to-end tests (`npm test`). |
 
-## Licence
+## Licences
 
-The bundled engine is Stockfish 19 (`vendor/stockfish/`), which is licensed under **GPL-3.0**. Its licence text is in `vendor/stockfish/LICENSE-stockfish.txt`. Distributing this extension with that build means the distribution has to follow GPL-3.0 terms, so the whole project is released under GPL-3.0. The full licence text is in [LICENSE](LICENSE).
-
-chess.js 1.4.0 (`vendor/chess/`) is licensed under **BSD-2-Clause**, with its licence text in `vendor/chess/LICENSE-chess.js.txt`.
+- **Project code** (everything outside `vendor/`) is licensed under the **MIT licence**. The full text is in [LICENSE](LICENSE), with copyright held by Louistuis.
+- **`vendor/stockfish/`** is the Stockfish engine, licensed under **GPL-3.0**. The files are the lite, single-threaded build (`stockfish-19-lite-single.js` and `.wasm`) from [nmrugg/stockfish.js](https://github.com/nmrugg/stockfish.js) release **v19.0.1** (npm package `stockfish` 19.0.1; the bundled files match it byte for byte). That build is based on [Stockfish](https://github.com/official-stockfish/Stockfish) 19 (tag `sf_19`). Its licence text is in `vendor/stockfish/LICENSE-stockfish.txt`.
+- **`vendor/chess/`** is chess.js 1.4.0, licensed under **BSD-2-Clause**, with its licence text in `vendor/chess/LICENSE-chess.js.txt`.
+- **The release zip is not purely MIT.** It includes the Stockfish files in `vendor/stockfish/`, which stay under their GPL-3.0 terms. Anyone who redistributes the zip has to follow GPL-3.0 for those files, and MIT covers only the project's own code.
 
 ## Not yet checked in real Chrome on live chess.com
 
