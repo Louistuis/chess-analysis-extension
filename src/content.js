@@ -37,7 +37,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { GameHistory } = window.ChessHistory;
   const { openingForGame } = window.ChessOpenings;
   const { uciToSan } = window.ChessSan;
-  const DEBOUNCE_MS = 300;
+  const DEBOUNCE_MS = 150;
+  const CACHE_LIMIT = 200;
   const URL_CHECK_MS = 1000;
 
   const overlay = new SuggestionOverlay();
@@ -52,7 +53,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   let gameContext = { opening: null, entries: [] };
   const currentGameContext = () => ({ opening: openingForGame(history.fens()), entries: history.entries() });
   // The panel's model, with the game so far: the opening it is in, and the history of best moves.
-  const withContext = (model) => withGameContext(model, gameContext.opening, gameContext.entries);
+  // The side the person at the board plays: the one at the bottom, so Black when the board is turned round.
+  const userColour = () => {
+    const board = ChessReader.findBoard(document);
+    return board && board.classList.contains('flipped') ? 'b' : 'w';
+  };
+  const withContext = (model) => withGameContext(model, gameContext.opening, gameContext.entries, userColour());
   // The best move as SAN for the position it is played in; null if it can't be read.
   const sanOf = (fen, uci) => {
     try {
@@ -63,6 +69,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   };
   let enabled = false; // stays off until the stored setting is read, so no engine work starts early
   let lineCount = 3;
+  let depthSetting = 12;
+  const cache = new Map(); // finished searches by position, depth and lines, so a position seen again shows at once
+  let activeFen = null; // the position the running search is for
   let timer = null;
   let shown = null; // { arrows, flipped, fen } for the arrows currently on the board
   let lastModel = null; // the finished model on the panel, so it can be redrawn with a new game context
@@ -79,25 +88,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (enabled && lastModel) panel.render(withContext(lastModel));
   }
 
+  const cacheKey = (fen) => `${GameHistory.keyOf(fen)}|${depthSetting}|${lineCount}`;
+
+  // Draws one arrow per line, best first: the move, its score as the label, and its gap to the best line for the colour.
+  // Returns the board, or null if there is none to draw on.
+  function drawArrows(result) {
+    const board = ChessReader.findBoard(document);
+    if (!board) return null;
+    const flipped = board.classList.contains('flipped');
+    const arrows = result.lines && result.lines.length
+      ? result.lines.slice(0, lineCount).map((line) => ({ move: line.move, label: formatScore(line.evaluation), gap: line.gap }))
+      : [{ move: result.move, label: formatScore(result.evaluation), gap: 0 }];
+    overlay.attach(board);
+    overlay.show(arrows, flipped);
+    shown = { arrows, flipped, fen: result.fen };
+    return board;
+  }
+
+  // The lines the engine has so far for the running search: arrows and panel update before it reaches its depth.
+  function showPartial(partial) {
+    if (!activeFen) return;
+    // The board may have moved on while the old search was still sending lines; those lines are for a past position.
+    if (readBoard().fen !== activeFen) return;
+    const result = { ...partial, fen: activeFen };
+    const board = drawArrows(result);
+    if (!board) return;
+    try {
+      panel.setAnchor(board);
+      panel.render(withContext(buildModel(result, activeFen, lineCount, { partial: true, targetDepth: depthSetting })));
+    } catch (err) {
+      // A line the panel can't read is skipped; the next update or the final answer replaces it.
+    }
+  }
+
   const tracker = new SuggestionTracker({
     ask: (fen) => {
+      const hit = cache.get(cacheKey(fen));
+      if (hit) {
+        cache.delete(cacheKey(fen)); // re-inserted by show(), which keeps the most recently used last
+        activeRequest = 0; // lines still arriving from the search for the previous position are no longer wanted
+        activeFen = null;
+        return Promise.resolve({ ...hit, fen });
+      }
       const requestId = ++requestSeq;
       activeRequest = requestId;
-      panel.render(withContext(buildSearching(null)));
+      activeFen = fen;
+      panel.render({ ...withContext(buildSearching(null)), targetDepth: depthSetting });
       return chrome.runtime.sendMessage({ type: 'BEST_MOVE', fen, requestId });
     },
     show: (result) => {
       activeRequest = 0; // the final answer is in; ignore any progress that arrives after it
-      const board = ChessReader.findBoard(document);
+      activeFen = null;
+      cache.set(cacheKey(result.fen), result);
+      if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value);
+      // The board may have moved on while this search finished; its lines are cached but belong to a past position.
+      if (readBoard().fen !== result.fen) return;
+      const board = drawArrows(result);
       if (!board) return;
-      const flipped = board.classList.contains('flipped');
-      // One arrow per line, best first: the move, its score as the label, and its gap to the best line for the colour.
-      const arrows = result.lines && result.lines.length
-        ? result.lines.slice(0, lineCount).map((line) => ({ move: line.move, label: formatScore(line.evaluation), gap: line.gap }))
-        : [{ move: result.move, label: formatScore(result.evaluation), gap: 0 }];
-      overlay.attach(board);
-      overlay.show(arrows, flipped);
-      shown = { arrows, flipped, fen: result.fen };
       try {
         checkGame();
         history.record({ fen: result.fen, san: sanOf(result.fen, result.move), evaluation: result.evaluation });
@@ -119,6 +166,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   function turnOff() {
     tracker.disable();
     activeRequest = 0;
+    activeFen = null;
+    cache.clear(); // answers for the old depth or number of lines no longer apply
     lastModel = null;
     panel.hide();
   }
@@ -177,12 +226,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message && message.type === 'ANALYSIS_PROGRESS' && enabled && message.requestId === activeRequest) {
       panel.updateStats(message.stats);
     }
+    if (message && message.type === 'ANALYSIS_PARTIAL' && enabled && message.requestId === activeRequest) {
+      showPartial(message.result);
+    }
     return false;
   });
 
   loadSettings().then((settings) => {
     enabled = settings.suggestionsEnabled;
     lineCount = settings.lines;
+    depthSetting = settings.depth;
     refresh();
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -190,6 +243,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const changed = changedSettings(changes);
     if ('suggestionsEnabled' in changed) enabled = changed.suggestionsEnabled;
     if ('lines' in changed) lineCount = changed.lines;
+    if ('depth' in changed) depthSetting = changed.depth;
     // Answers for the old setting no longer apply: drop them and ask again for the current position.
     if (!enabled) turnOff();
     else if ('depth' in changed || 'lines' in changed) turnOff();

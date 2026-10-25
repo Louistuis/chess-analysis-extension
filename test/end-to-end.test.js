@@ -133,7 +133,7 @@ function setup({ enabled = true, depth = 12, lines = 3, empty = false } = {}) {
   vm.runInContext(src('src/background.js'), bgSandbox);
 
   // Load the content scripts in the manifest's order.
-  for (const file of ['src/chess-reader.js', 'src/overlay.js', 'src/settings.js', 'vendor/chess/chess.js', 'src/san.js', 'src/openings-data.js', 'src/openings.js', 'src/history.js', 'src/panel.js', 'src/content.js']) {
+  for (const file of ['src/chess-reader.js', 'src/overlay.js', 'src/settings.js', 'vendor/chess/chess.js', 'src/san.js', 'src/openings-data.js', 'src/openings.js', 'src/history.js', 'src/review.js', 'src/panel.js', 'src/content.js']) {
     dom.window.eval(src(file));
   }
 
@@ -221,7 +221,7 @@ test('the analysis panel shows a table of five lines and five numbered arrows wi
     assert.match(panelRoot().querySelector('.technical').textContent, /^depth \d+ · seldepth \d+ · nodes \d+ · nps \d+ · hashfull \d+ · time \d+ ms$/);
     assert.ok(panelRoot().querySelector('.wdl-text').textContent.includes('%'), 'win/draw/loss is shown');
     assert.match(panelRoot().querySelector('.opening').textContent, /^Opening: /);
-    assert.ok(panelRoot().querySelectorAll('.history-row').length >= 1, 'the game history has the start position');
+    await until(() => panelRoot().querySelectorAll('.history-row').length >= 1, 'the finished search to reach the game history');
   } finally {
     t.stop();
   }
@@ -395,6 +395,30 @@ test('a short game, 1.e4 c5 2.Nf3 d6, through the real chain with five lines: ar
     const historyMoves = [...panelRoot().querySelectorAll('.history-row .h-move')].map((n) => n.textContent);
     assert.deepEqual(historyMoves, positions.map((fen) => uciToSan(fen, [answerFor(fen).lines[0].move])[0]));
     assert.equal(panelRoot().querySelectorAll('.history-row').length, 5);
+  } finally {
+    t.stop();
+  }
+});
+
+test('a position seen again is shown from the cache without asking the engine again, and lines appear while the search runs', async () => {
+  const t = setup();
+  try {
+    const panelRoot = () => t.document.querySelector('[data-analysis-panel]')?.shadowRoot;
+    const requests = () => t.bus.messages.filter((m) => m.from === 'content' && m.message.type === 'BEST_MOVE');
+    await until(() => (panelRoot()?.querySelectorAll('.history-row').length ?? 0) === 1, 'the first search to finish');
+    assert.ok(t.bus.messages.some((m) => m.message.type === 'ANALYSIS_PARTIAL'), 'the engine sent lines before it finished');
+    assert.equal(requests().length, 1);
+
+    const pawn = t.document.querySelector('[data-sq="e2"]');
+    pawn.className = 'piece wp ' + sq('e4');
+    await until(() => panelRoot().querySelectorAll('.history-row').length === 2, 'the second position to finish');
+    assert.equal(requests().length, 2);
+
+    pawn.className = 'piece wp ' + sq('e2'); // take the move back: the start position again
+    await until(() => t.arrowDrawn(), 'the arrow for the position seen before');
+    await tick(600);
+    assert.equal(requests().length, 2, 'the engine was not asked about the start position a second time');
+    assert.equal(t.arrowDrawn(), true);
   } finally {
     t.stop();
   }

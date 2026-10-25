@@ -238,3 +238,80 @@ test('checkmated position (no legal moves) rejects instead of returning a move',
     stop();
   }
 });
+
+test('a superseded search is stopped at once and rejects, and the newer one is answered', async () => {
+  const { engine, stop } = startEngine();
+  try {
+    const slow = engine.bestMove('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', 30, { supersede: true });
+    slow.catch(() => {});
+    await new Promise((r) => setTimeout(r, 300)); // let the long search get going
+    const started = Date.now();
+    const fast = await engine.bestMove('rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', 6, { supersede: true });
+    await assert.rejects(slow, /superseded/);
+    assert.ok(Date.now() - started < 5000, 'the depth 30 search must not run to its end');
+    assert.match(fast.move, /^[a-h][1-8][a-h][1-8]/);
+  } finally {
+    stop();
+  }
+});
+
+test('a request that is dropped while it waits is never sent to the engine', async () => {
+  const { worker, sent } = fakeWorker((command) => {
+    if (command === 'uci') return ['uciok'];
+    if (command === 'isready') return ['readyok'];
+    if (command.startsWith('go')) return ['info depth 1 score cp 10 multipv 1 pv e2e4', 'bestmove e2e4'];
+    return [];
+  });
+  const engine = new Engine(worker);
+  const results = await Promise.allSettled([
+    engine.bestMove(FEN, 1, { supersede: true }),
+    engine.bestMove(FEN, 2, { supersede: true }),
+    engine.bestMove(FEN, 3, { supersede: true }),
+  ]);
+  assert.equal(results[2].status, 'fulfilled');
+  assert.equal(results[1].status, 'rejected');
+  assert.ok(sent.filter((c) => c.startsWith('go')).length <= 2, 'the middle request is skipped');
+  assert.ok(sent.includes('go depth 3'));
+});
+
+test('the hash table is kept between searches: ucinewgame is sent once, at start-up, with the analysis options', async () => {
+  const { worker, sent } = fakeWorker((command) => {
+    if (command === 'uci') return ['uciok'];
+    if (command === 'isready') return ['readyok'];
+    if (command.startsWith('go')) return ['info depth 1 score cp 10 multipv 1 pv e2e4', 'bestmove e2e4'];
+    return [];
+  });
+  const engine = new Engine(worker);
+  await engine.bestMove(FEN, 1);
+  await engine.bestMove(FEN, 1);
+  assert.equal(sent.filter((c) => c === 'ucinewgame').length, 1);
+  assert.ok(sent.includes('setoption name UCI_AnalyseMode value true'));
+  assert.ok(sent.some((c) => c.startsWith('setoption name Hash value ')));
+});
+
+test('onPartial reports the lines found so far, shaped like the final result, before the search ends', async () => {
+  const { engine, stop } = startEngine();
+  try {
+    const partials = [];
+    const result = await engine.bestMove('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', 10, { lines: 3, onPartial: (p) => partials.push(p) });
+    assert.ok(partials.length >= 1, 'at least one partial result');
+    const first = partials[0];
+    assert.equal(first.lines.length, 3);
+    assert.ok(first.lines.every((line) => /^[a-h][1-8][a-h][1-8]/.test(line.move)));
+    assert.ok(first.depth <= result.depth);
+    assert.equal(partials.every((p) => p.move === p.lines[0].move), true);
+  } finally {
+    stop();
+  }
+});
+
+test('bound scores from a narrowed search window are not taken as a line’s score', async () => {
+  const { worker } = fakeWorker((command) => {
+    if (command === 'uci') return ['uciok'];
+    if (command === 'isready') return ['readyok'];
+    if (command.startsWith('go')) return ['info depth 5 multipv 1 score cp 10 pv e2e4', 'info depth 6 multipv 1 score cp 900 lowerbound pv d2d4', 'bestmove e2e4'];
+    return [];
+  });
+  const result = await new Engine(worker).bestMove(FEN, 6);
+  assert.equal(result.evaluation.value, 10);
+});

@@ -22,6 +22,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   getEngine()
     .bestMove(message.fen, message.depth, {
       lines: message.lines,
+      supersede: true, // a newer position makes this search pointless: stop it and start the new one at once
+      onPartial: (partial) => {
+        // The lines found so far, so the tab can show them before the search reaches its depth.
+        chrome.runtime.sendMessage({ target: 'background', type: 'ENGINE_PARTIAL', tabId, requestId, result: partial }).catch(() => {});
+      },
       onProgress: (stats) => {
         // Live stats go to the background, which passes them to the tab that asked.
         chrome.runtime.sendMessage({ target: 'background', type: 'ENGINE_PROGRESS', tabId, requestId, stats }).catch(() => {});

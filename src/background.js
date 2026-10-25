@@ -35,6 +35,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     return false;
   }
+  if (message && message.type === 'ENGINE_PARTIAL') {
+    if (message.tabId !== undefined) {
+      chrome.tabs
+        .sendMessage(message.tabId, { type: 'ANALYSIS_PARTIAL', requestId: message.requestId, result: message.result })
+        .catch(() => {});
+    }
+    return false;
+  }
   if (!message || message.type !== 'BEST_MOVE') return false;
   const tabId = sender.tab ? sender.tab.id : undefined;
   (async () => {

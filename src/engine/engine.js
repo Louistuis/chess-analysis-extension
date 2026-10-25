@@ -12,6 +12,9 @@
   const TIMEOUT_MS = 60000;
   const STOP_TIMEOUT_MS = 10000;
   const PROGRESS_INTERVAL_MS = 250;
+  const PARTIAL_INTERVAL_MS = 120;
+  const HASH_MB = 32;
+  const SUPERSEDED = 'Search superseded by a newer position.';
 
   class Engine {
     constructor(worker, options = {}) {
@@ -21,6 +24,8 @@
       this.failure = null;
       this.waiters = [];
       this.queue = Promise.resolve();
+      this.latestToken = 0;
+      this.running = null; // { stopped } for the search whose `go` is in flight
       this.ready = null;
       worker.onmessage = (event) => {
         const line = typeof event === 'string' ? event : event.data;
@@ -79,6 +84,12 @@
         this.ready = (async () => {
           this.send('uci');
           await this.waitFor((line) => (line === 'uciok' ? true : undefined), 'uciok');
+          // Set once, so the hash table survives from one position to the next and a position that follows the
+          // previous line is found there instead of being searched again from nothing.
+          this.send('setoption name UCI_AnalyseMode value true');
+          this.send('setoption name Hash value ' + HASH_MB);
+          this.send('setoption name UCI_ShowWDL value true');
+          this.send('ucinewgame');
           this.send('isready');
           await this.waitFor((line) => (line === 'readyok' ? true : undefined), 'readyok');
         })().catch((err) => {
@@ -95,33 +106,51 @@
     // `mateGap` is true when a mate score is involved, so the gap is not a plain centipawn difference.
     // `move`, `pv`, `depth` and `evaluation` are the best line's. Evaluations are from White's point of view.
     // options.onProgress({ depth, nodes, nps }) is called while the search runs, at most every 250 ms.
+    // options.onPartial(result) is called each time the engine finishes a depth for all lines (at most every 120 ms),
+    // with a result shaped like the final one, so the caller can show the lines found so far.
+    // options.supersede: a search that is running is stopped, and one that is still waiting its turn is dropped, as soon as
+    // this request arrives. They reject with "Search superseded...". Without it, requests run one after another.
     bestMove(fen, depth = DEFAULT_DEPTH, options = {}) {
-      const task = this.queue.then(() => this.search(fen, clampDepth(depth), options));
+      const token = ++this.latestToken;
+      if (options.supersede && this.running) this.stopRunning();
+      const task = this.queue.then(() => this.search(fen, clampDepth(depth), options, token));
       this.queue = task.catch(() => {});
       return task;
     }
 
-    async search(fen, depth, options) {
+    // Asks the running search to finish now; its answer is then discarded by search().
+    stopRunning() {
+      if (!this.running || this.running.stopped) return;
+      this.running.stopped = true;
+      this.send('stop');
+    }
+
+    async search(fen, depth, options, token) {
       if (this.failure) throw this.failure;
       const normalized = validateFen(fen); // rejects bad input before the engine sees it
       const sideToMove = normalized.split(' ')[1];
       const lineCount = clampLines(options.lines);
       await this.init();
-      this.send('ucinewgame');
+      // A newer request arrived while this one waited, so its position is already out of date.
+      if (options.supersede && token !== this.latestToken) throw new Error(SUPERSEDED);
       this.send('setoption name MultiPV value ' + lineCount);
-      this.send('setoption name UCI_ShowWDL value true');
       this.send('position fen ' + normalized);
       this.send('go depth ' + depth);
+      const run = { stopped: false };
+      this.running = run;
 
       const best = new Map(); // MultiPV rank -> latest info for that rank
       let stats = null;
       let lastProgress = 0;
+      let lastPartial = 0;
       let result;
       try {
         result = await this.waitFor((line) => {
           if (line.startsWith('info ')) {
             const parsed = parseInfo(line);
             if (!parsed) return undefined;
+            // A bound is a guess from a narrowed search window, not a finished score for the line.
+            if (/\b(?:lowerbound|upperbound)\b/.test(line)) return undefined;
             best.set(parsed.multipv, parsed);
             if (parsed.nodes !== null) {
               stats = statsFrom(parsed);
@@ -129,6 +158,14 @@
               if (options.onProgress && now - lastProgress >= PROGRESS_INTERVAL_MS) {
                 lastProgress = now;
                 options.onProgress(stats);
+              }
+            }
+            if (options.onPartial && !run.stopped && parsed.multipv === lineCount) {
+              const now = Date.now();
+              if (now - lastPartial >= PARTIAL_INTERVAL_MS) {
+                lastPartial = now;
+                const partial = assemble(best, lineCount, sideToMove, null, stats, depth);
+                if (partial) options.onPartial(partial);
               }
             }
             return undefined;
@@ -145,37 +182,47 @@
           await this.waitFor((line) => (line.startsWith('bestmove') ? true : undefined), 'stop', STOP_TIMEOUT_MS).catch(() => {});
         }
         throw err;
+      } finally {
+        if (this.running === run) this.running = null;
       }
 
+      if (run.stopped) throw new Error(SUPERSEDED);
       if (result.move === '(none)') {
         throw new Error('No legal moves in this position.');
       }
-      const ranked = [...best.values()]
-        .filter((info) => info.multipv <= lineCount && info.pv.length > 0)
-        .sort((a, b) => a.multipv - b.multipv);
-      const bestInfo = ranked[0] || null;
-      const lines = ranked.map((info) => ({
-        rank: info.multipv,
-        move: info.pv[0],
-        pv: info.pv,
-        depth: info.depth,
-        evaluation: toWhitePov(info.score, sideToMove),
-        wdl: info.wdl ? toWhitePovWdl(info.wdl, sideToMove) : null,
-        gap: gapBetween(bestInfo.score, info.score),
-        mateGap: info.score.type === 'mate' || bestInfo.score.type === 'mate',
-      }));
-      const top = lines[0] || null;
-      return {
-        move: result.move,
-        ponder: result.ponder,
-        depth: top ? top.depth : depth,
-        pv: top ? top.pv : [],
-        evaluation: top ? top.evaluation : null,
-        wdl: top ? top.wdl : null,
-        lines,
-        stats: stats || statsFrom({ depth, seldepth: null, nodes: null, nps: null, hashfull: null, time: null }),
-      };
+      return assemble(best, lineCount, sideToMove, result, stats, depth);
     }
+  }
+
+  // Builds the result object from the latest info of each rank. With `result` (the engine's bestmove) it is the final
+  // answer; without it, a snapshot of the search so far, or null if no line has a move yet.
+  function assemble(best, lineCount, sideToMove, result, stats, depth) {
+    const ranked = [...best.values()]
+      .filter((info) => info.multipv <= lineCount && info.pv.length > 0)
+      .sort((a, b) => a.multipv - b.multipv);
+    const bestInfo = ranked[0] || null;
+    if (!result && !bestInfo) return null;
+    const lines = ranked.map((info) => ({
+      rank: info.multipv,
+      move: info.pv[0],
+      pv: info.pv,
+      depth: info.depth,
+      evaluation: toWhitePov(info.score, sideToMove),
+      wdl: info.wdl ? toWhitePovWdl(info.wdl, sideToMove) : null,
+      gap: gapBetween(bestInfo.score, info.score),
+      mateGap: info.score.type === 'mate' || bestInfo.score.type === 'mate',
+    }));
+    const top = lines[0] || null;
+    return {
+      move: result ? result.move : top.move,
+      ponder: result ? result.ponder : null,
+      depth: top ? top.depth : depth,
+      pv: top ? top.pv : [],
+      evaluation: top ? top.evaluation : null,
+      wdl: top ? top.wdl : null,
+      lines,
+      stats: stats || statsFrom({ depth, seldepth: null, nodes: null, nps: null, hashfull: null, time: null }),
+    };
   }
 
   // Checks the parts of a FEN the engine needs: 8 ranks of 8 squares, one king each, and a side to move.
