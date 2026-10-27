@@ -35,18 +35,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     return false;
   }
+  if (message && message.type === 'ENGINE_PARTIAL') {
+    if (message.tabId !== undefined) {
+      chrome.tabs
+        .sendMessage(message.tabId, { type: 'ANALYSIS_PARTIAL', requestId: message.requestId, result: message.result })
+        .catch(() => {});
+    }
+    return false;
+  }
   if (!message || message.type !== 'BEST_MOVE') return false;
   const tabId = sender.tab ? sender.tab.id : undefined;
   (async () => {
     await ensureOffscreen();
     // Read the settings for each search, so a change in the popup applies to the next search.
-    const { depth, lines } = await ChessSettings.loadSettings();
+    const { depth, lines, elo } = await ChessSettings.loadSettings();
     return chrome.runtime.sendMessage({
       target: 'offscreen',
       type: 'ENGINE_BEST_MOVE',
       fen: message.fen,
       depth,
       lines,
+      elo, // practice strength, or null for Full strength
       tabId,
       requestId: message.requestId,
     });

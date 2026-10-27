@@ -11,6 +11,9 @@ const {
   formatHistoryRow,
   formatTechnical,
   formatGap,
+  describeEval,
+  lineQuality,
+  depthProgress,
   buildModel,
   buildSearching,
   withGameContext,
@@ -277,4 +280,101 @@ test('the on-page panel sits in a shadow root and can be shown and hidden', () =
   panel.render(buildSearching({ depth: 3, nodes: null, nps: null }));
   assert.equal(host.style.display, '');
   assert.equal(doc.querySelectorAll('[data-analysis-panel]').length, 1, 'the same panel is reused');
+});
+
+test('a verdict puts the score into words, from Equal to winning, and names the mating side', () => {
+  const cp = (value) => ({ type: 'cp', value });
+  assert.equal(describeEval(cp(10)), 'Equal position');
+  assert.equal(describeEval(cp(-10)), 'Equal position');
+  assert.equal(describeEval(cp(45)), 'White is slightly better');
+  assert.equal(describeEval(cp(-100)), 'Black is better');
+  assert.equal(describeEval(cp(250)), 'White is much better');
+  assert.equal(describeEval(cp(-600)), 'Black is winning');
+  assert.equal(describeEval({ type: 'mate', value: 3 }), 'White mates in 3');
+  assert.equal(describeEval({ type: 'mate', value: -1 }), 'Black mates in 1');
+  assert.equal(describeEval(null), '');
+});
+
+test('a line is called best, equally strong, playable, worse or poor by its gap', () => {
+  assert.equal(lineQuality(1, 0, false), 'Best');
+  assert.equal(lineQuality(2, 10, false), 'Equally strong');
+  assert.equal(lineQuality(2, 40, false), 'Playable');
+  assert.equal(lineQuality(3, 120, false), 'Worse');
+  assert.equal(lineQuality(4, 400, false), 'Poor');
+  assert.equal(lineQuality(2, 900, true), 'Much worse');
+});
+
+test('depth progress says how far the search is and never goes past the target', () => {
+  assert.deepEqual(depthProgress(6, 12), { text: 'Depth 6 of 12', fraction: 0.5 });
+  assert.deepEqual(depthProgress(14, 12), { text: 'Depth 12 of 12', fraction: 1 });
+  assert.equal(depthProgress(null, 12), null);
+});
+
+const SEARCH = {
+  evaluation: { type: 'cp', value: 40, whitePov: true },
+  depth: 7,
+  wdl: null,
+  lines: [
+    { rank: 1, move: 'e2e4', pv: ['e2e4', 'e7e5', 'g1f3', 'b8c6'], depth: 7, gap: 0, mateGap: false, evaluation: { type: 'cp', value: 40, whitePov: true } },
+    { rank: 2, move: 'd2d4', pv: ['d2d4', 'd7d5'], depth: 7, gap: 90, mateGap: false, evaluation: { type: 'cp', value: -50, whitePov: true } },
+  ],
+  stats: { depth: 7, seldepth: 9, nodes: 1000, nps: 100000, hashfull: 0, time: 10 },
+};
+
+test('the panel leads with a verdict and the best move, and explains each line under its row', () => {
+  const container = rendered(buildModel(SEARCH, START, 2));
+  assert.equal(container.querySelector('.verdict').textContent, 'White is slightly better');
+  assert.equal(container.querySelector('.bestmove strong').textContent, 'e4');
+  const details = [...container.querySelectorAll('.line-detail')].map((row) => [row.querySelector('.quality').textContent, row.querySelector('.preview').textContent]);
+  assert.deepEqual(details, [['Best', '1. e4 e5 2. Nf3 Nc6'], ['Worse', '1. d4 d5']]);
+  assert.equal(container.querySelector('.progress'), null, 'a finished search has no progress bar');
+});
+
+test('a search still running shows its lines so far with a depth bar towards the target', () => {
+  const model = buildModel(SEARCH, START, 2, { partial: true, targetDepth: 14 });
+  assert.equal(model.status, 'searching');
+  const container = rendered(model);
+  assert.equal(container.querySelector('.best-score').textContent, '+0.40', 'the score so far, not just “Searching…”');
+  assert.equal(container.querySelectorAll('tr.line').length, 2);
+  assert.equal(container.querySelector('.progress-fill').style.width, '50%');
+  assert.match(container.querySelector('.progress-text').textContent, /Depth 7 of 14/);
+});
+
+test('the panel draws an evaluation graph and a game review once the game has moves', () => {
+  const cp = (value) => ({ type: 'cp', value, whitePov: true });
+  const model = withGameContext(buildModel(SEARCH, START, 2), null, [
+    { fen: START, san: 'c5', evaluation: cp(30) },
+    { fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', san: 'c5', evaluation: cp(30) },
+    { fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2', san: 'Nf3', evaluation: cp(800) },
+  ]);
+  const container = rendered(model);
+  assert.ok(container.querySelector('svg.graph polyline'), 'the evaluation graph');
+  assert.ok(container.querySelector('.graph-dot'), 'a dot marks the newest position');
+  const summary = [...container.querySelectorAll('.review-side')].map((side) => side.querySelector('strong').textContent);
+  assert.match(summary[0], /^White \d+%$/);
+  assert.match(summary[1], /^Black \d+%$/);
+  const notable = [...container.querySelectorAll('.review-row')].map((row) => row.textContent);
+  assert.equal(notable.length, 1);
+  assert.match(notable[0], /e5\?\?.*Blunder.*best c5/);
+});
+
+test('without enough history there is no graph and no review', () => {
+  const container = rendered(withGameContext(buildModel(SEARCH, START, 2), null, [{ fen: START, san: 'e4', evaluation: { type: 'cp', value: 30 } }]));
+  assert.equal(container.querySelector('svg.graph'), null);
+  assert.equal(container.querySelector('.review-summary'), null);
+});
+
+test('the opponent check names the other side, its signal, its figures and a rough rating, with a not-proof note', () => {
+  const cpv = (value) => ({ type: 'cp', value, whitePov: true });
+  const entries = [
+    { fen: START, san: 'e4', evaluation: cpv(30) },
+    { fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', san: 'e5', evaluation: cpv(30) },
+  ];
+  const model = withGameContext(buildModel(SEARCH, START, 2), null, entries, 'b');
+  const container = rendered(model);
+  assert.match(container.querySelector('.section:nth-of-type(n)').parentNode.textContent, /Opponent check \(White\)/);
+  assert.match(container.querySelector('.opp-level').className, /collecting/);
+  assert.match(container.querySelector('.opp-elo').textContent, /not enough moves yet/);
+  assert.match(container.querySelector('.opp-you').textContent, /^You \(Black\)/);
+  assert.match(container.querySelector('.opp-note').textContent, /not proof/);
 });
