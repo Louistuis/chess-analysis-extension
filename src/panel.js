@@ -10,6 +10,7 @@
   const PANEL_PLIES = 8; // moves of each line shown in the panel
   const PREVIEW_PLIES = 5; // moves of each line shown under its row
   const PANEL_WIDTH = 280;
+  const STATS_INTERVAL_MS = 400; // the live numbers in the panel update at most this often
   const PANEL_ESTIMATE_HEIGHT = 520; // used until the panel has been drawn and can be measured
   const GAP = 12; // space between the board and the panel
   const MARGIN = 8; // space between the panel and the edge of the window
@@ -193,6 +194,45 @@
 
   // Adds what the game so far says to a model: the opening it is in, and the history of best moves.
   // `userColor` ('w' or 'b') is the side the person at the board plays, so the other side is the one checked.
+  // "Practice strength: ~1500 Elo" while the engine plays at a set strength; nothing at Full strength.
+  function formatStrength(elo) {
+    return elo === null || elo === undefined ? null : `Practice strength: ~${elo} Elo`;
+  }
+
+  // Adds the practice-strength line to a model, so the panel says the lines come from a limited engine.
+  function withPracticeStrength(model, elo) {
+    return { ...model, strength: formatStrength(elo) };
+  }
+
+  // Runs `fn` at most once per `intervalMs`. The first call runs at once; calls in between keep only the latest value,
+  // which runs when the interval is up, so fast progress ticks don't make the numbers jitter. `cancel()` drops a waiting value.
+  function throttle(fn, intervalMs, { now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+    let last = -Infinity;
+    let timer = null;
+    let pending = null; // { value } while a call is waiting for its turn
+    const run = () => {
+      timer = null;
+      const next = pending;
+      pending = null;
+      if (!next) return;
+      last = now();
+      fn(next.value);
+    };
+    const throttled = (value) => {
+      pending = { value };
+      if (timer !== null) return;
+      const wait = intervalMs - (now() - last);
+      if (wait <= 0) run();
+      else timer = setTimer(run, wait);
+    };
+    throttled.cancel = () => {
+      pending = null;
+      if (timer !== null) clearTimer(timer);
+      timer = null;
+    };
+    return throttled;
+  }
+
   function withGameContext(model, opening, entries, userColor = 'w') {
     return { ...model, opening: opening || null, history: entries.map(formatHistoryRow), review: Review.buildReview(entries), userColor };
   }
@@ -248,6 +288,7 @@
     }
     top.appendChild(side);
     container.appendChild(top);
+    if (model.strength) container.appendChild(el('div', 'strength', model.strength));
 
     if (searching && model.progress) {
       const progress = el('div', 'progress');
@@ -473,6 +514,10 @@
     .technical { color: var(--muted); font-size: 10px; margin-top: 4px; word-break: break-word; }
     .note { color: #a1650a; font-size: 10px; margin-top: 6px; }
     .message { color: var(--muted); }
+    .strength { display: inline-block; font-size: 10.5px; color: var(--muted); background: var(--soft); border-radius: 4px; padding: 1px 6px; margin: -2px 0 8px; }
+    @media (prefers-reduced-motion: reduce) {
+      .panel *, .panel { transition: none !important; animation: none !important; }
+    }
   `;
 
   const rectOf = (el) => {
@@ -494,6 +539,9 @@
       this.collapsed = false; // the user's choice
       this.tabMode = false; // no room for the open panel, so it is shown as a tab
       this.visible = false; // the suggestions are on and there is a position to show
+      this.targetDepth = null;
+      // Live stats arrive often; the panel redraws its numbers at most every STATS_INTERVAL_MS.
+      this.statsThrottle = throttle((stats) => this.applyStats(stats), STATS_INTERVAL_MS);
     }
 
     ensure() {
@@ -581,12 +629,18 @@
       this.ensure();
       this.visible = true;
       this.targetDepth = model.targetDepth || null;
+      this.statsThrottle.cancel(); // stats waiting from the last search would otherwise land on this model
       renderPanel(this.body, model);
       this.place();
     }
 
     // Live stats only: the technical row and the depth bar change on each progress tick, so the rest is left alone.
+    // Throttled, so the numbers update a few times a second rather than on every tick.
     updateStats(stats) {
+      this.statsThrottle(stats);
+    }
+
+    applyStats(stats) {
       if (!this.body) return;
       const row = this.body.querySelector('.technical');
       if (row) row.textContent = formatTechnical(stats) || 'No search stats yet';
@@ -623,6 +677,9 @@
     buildModel,
     buildSearching,
     withGameContext,
+    formatStrength,
+    withPracticeStrength,
+    throttle,
     renderPanel,
     AnalysisPanel,
   };

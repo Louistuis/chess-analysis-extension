@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { ChessReader } = window;
   const { SuggestionTracker, SuggestionOverlay } = window.ChessOverlay;
   const { loadSettings, changedSettings } = window.ChessSettings;
-  const { AnalysisPanel, buildModel, buildSearching, withGameContext, formatScore } = window.ChessPanel;
+  const { AnalysisPanel, buildModel, buildSearching, withGameContext, withPracticeStrength, formatScore } = window.ChessPanel;
   const { GameHistory } = window.ChessHistory;
   const { openingForGame } = window.ChessOpenings;
   const { uciToSan } = window.ChessSan;
@@ -58,7 +58,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const board = ChessReader.findBoard(document);
     return board && board.classList.contains('flipped') ? 'b' : 'w';
   };
-  const withContext = (model) => withGameContext(model, gameContext.opening, gameContext.entries, userColour());
+  // The model also says the practice strength, when one is set, so the person can tell the lines are from a weaker engine.
+  const withContext = (model) => withPracticeStrength(withGameContext(model, gameContext.opening, gameContext.entries, userColour()), practiceElo);
   // The best move as SAN for the position it is played in; null if it can't be read.
   const sanOf = (fen, uci) => {
     try {
@@ -70,6 +71,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   let enabled = false; // stays off until the stored setting is read, so no engine work starts early
   let lineCount = 3;
   let depthSetting = 12;
+  let practiceElo = null; // the practice strength in Elo, or null for Full strength
   const cache = new Map(); // finished searches by position, depth and lines, so a position seen again shows at once
   let activeFen = null; // the position the running search is for
   let timer = null;
@@ -156,6 +158,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         panel.render({ status: 'error', message: 'Could not show the lines for this position.' });
       }
     },
+    // The position changed: the old arrows stay on the board, faint, until the new position has an answer.
+    stale: () => {
+      overlay.dim();
+      if (shown) shown.stale = true;
+    },
     hide: () => {
       overlay.clear();
       shown = null;
@@ -197,6 +204,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const flipped = !shown.flipped;
       overlay.attach(board); // the board may have re-rendered and dropped the arrows' SVG
       overlay.show(shown.arrows, flipped);
+      if (shown.stale) overlay.dim(); // redrawing the faint arrows for a new board view keeps them faint
       shown.flipped = flipped;
     }
   }
@@ -205,10 +213,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const observer = new MutationObserver((mutations) => {
     // Ignore changes to the arrows themselves, or the arrows would trigger another refresh.
     if (mutations.every((m) => overlay.svg && overlay.svg.contains(m.target))) return;
-    // Drop arrows for a position that is no longer on the board, without waiting for the debounce.
-    if (shown && readBoard().fen !== shown.fen) {
-      overlay.clear();
-      shown = null;
+    // The arrows are for a position that is no longer on the board: fade them now, without waiting for the debounce.
+    if (shown && !shown.stale && readBoard().fen !== shown.fen) {
+      overlay.dim();
+      shown.stale = true;
     }
     clearTimeout(timer);
     timer = setTimeout(refresh, DEBOUNCE_MS);
@@ -236,6 +244,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     enabled = settings.suggestionsEnabled;
     lineCount = settings.lines;
     depthSetting = settings.depth;
+    practiceElo = settings.elo;
     refresh();
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -244,9 +253,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if ('suggestionsEnabled' in changed) enabled = changed.suggestionsEnabled;
     if ('lines' in changed) lineCount = changed.lines;
     if ('depth' in changed) depthSetting = changed.depth;
+    if ('elo' in changed) practiceElo = changed.elo;
     // Answers for the old setting no longer apply: drop them and ask again for the current position.
     if (!enabled) turnOff();
-    else if ('depth' in changed || 'lines' in changed) turnOff();
+    else if ('depth' in changed || 'lines' in changed || 'elo' in changed) turnOff();
     refresh();
   });
 })();

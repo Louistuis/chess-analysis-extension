@@ -48,13 +48,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     await ensureOffscreen();
     // Read the settings for each search, so a change in the popup applies to the next search.
-    const { depth, lines } = await ChessSettings.loadSettings();
+    const { depth, lines, elo } = await ChessSettings.loadSettings();
     return chrome.runtime.sendMessage({
       target: 'offscreen',
       type: 'ENGINE_BEST_MOVE',
       fen: message.fen,
       depth,
       lines,
+      elo, // practice strength, or null for Full strength
       tabId,
       requestId: message.requestId,
     });

@@ -66,10 +66,11 @@ function fakeChrome(bus, name, extra = {}) {
   };
 }
 
-function setup({ enabled = true, depth = 12, lines = 3, empty = false } = {}) {
+function setup({ enabled = true, depth = 12, lines = 3, elo = null, empty = false } = {}) {
   const bus = makeBus();
   const procs = [];
-  const stored = empty ? {} : { suggestionsEnabled: enabled, depth, lines }; // what chrome.storage.local holds, shared by all contexts
+  const commands = []; // every UCI command that reaches the engine, in order
+  const stored = empty ? {} : { suggestionsEnabled: enabled, depth, lines, elo }; // what chrome.storage.local holds, shared by all contexts
 
   // Content script, in a jsdom page.
   const dom = new JSDOM(boardHtml(START), { runScripts: 'outside-only', url: 'https://www.chess.com/game/live/1' });
@@ -99,7 +100,7 @@ function setup({ enabled = true, depth = 12, lines = 3, empty = false } = {}) {
           for (const line of lines) if (this.onmessage) this.onmessage({ data: line });
         });
       }
-      postMessage(command) { this.proc.stdin.write(command + '\n'); }
+      postMessage(command) { commands.push(command); this.proc.stdin.write(command + '\n'); }
       terminate() { this.proc.kill(); }
     },
   };
@@ -141,7 +142,7 @@ function setup({ enabled = true, depth = 12, lines = 3, empty = false } = {}) {
   const arrow = () => document.querySelector('[data-suggestion-overlay]');
   const arrowDrawn = () => !!arrow() && !!arrow().querySelector('line') && !!arrow().querySelector('polygon');
   return {
-    bus, dom, document, arrow, arrowDrawn, storageListeners, stored,
+    commands, bus, dom, document, arrow, arrowDrawn, storageListeners, stored,
     offscreenCreated: () => offscreenCreated,
     stop: () => { for (const p of procs) p.kill(); dom.window.close(); },
   };
@@ -167,12 +168,14 @@ test('an arrow is drawn for the start position, cleared when the position change
     assert.equal(first.message.fen, 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
     const firstPoints = t.arrow().querySelector('polygon').getAttribute('points');
 
-    // Play 1. e4 on the page: the arrow for the old position must go away straight away.
+    // Play 1. e4 on the page: the old arrow fades at once, and stays faint until the new position has an answer.
     const pawn = t.document.querySelector('[data-sq="e2"]');
     pawn.className = 'piece wp ' + sq('e4');
-    await until(() => !t.arrowDrawn(), 'the arrow to clear', 2000);
+    await until(() => t.arrow().hasAttribute('data-stale'), 'the old arrow to fade', 2000);
+    assert.ok(t.arrowDrawn(), 'the old arrow is still on the board, faintly');
 
-    await until(t.arrowDrawn, 'the arrow for the new position');
+    await until(() => !t.arrow().hasAttribute('data-stale') && t.arrowDrawn(), 'the arrow for the new position');
+    await tick(250); // the old arrow finishes fading out
     const secondRequest = t.bus.messages.filter((m) => m.from === 'content' && m.message.type === 'BEST_MOVE').pop();
     assert.match(secondRequest.message.fen, /^rnbqkbnr\/pppppppp\/8\/8\/4P3\/8\/PPPP1PPP\/RNBQKBNR /);
     assert.notEqual(t.arrow().querySelector('polygon').getAttribute('points'), firstPoints);
@@ -268,6 +271,36 @@ test('a new depth is used for the next search, straight away and without a reloa
   }
 });
 
+test('a practice strength is used for the next search and shown in the panel, and Full strength is used again after it', async () => {
+  const t = setup({ elo: null });
+  try {
+    const panelRoot = () => t.document.querySelector('[data-analysis-panel]')?.shadowRoot;
+    await until(t.arrowDrawn, 'the first arrow');
+    assert.equal(t.bus.messages.filter((m) => m.message.type === 'ENGINE_BEST_MOVE').pop().message.elo, null, 'Full strength at first');
+    assert.equal(panelRoot().querySelector('.strength'), null, 'no strength line at Full strength');
+
+    t.stored.elo = 1500;
+    for (const listener of t.storageListeners) listener({ elo: { oldValue: null, newValue: 1500 } }, 'local');
+    await until(
+      () => t.bus.messages.some((m) => m.message.type === 'ENGINE_BEST_MOVE' && m.message.elo === 1500),
+      'a search at practice strength 1500',
+      5000,
+    );
+    await until(() => panelRoot()?.querySelector('.strength')?.textContent === 'Practice strength: ~1500 Elo', 'the strength line in the panel', 5000);
+    await until(t.arrowDrawn, 'the arrow from the practice-strength search');
+
+    t.stored.elo = null;
+    for (const listener of t.storageListeners) listener({ elo: { oldValue: 1500, newValue: null } }, 'local');
+    await until(
+      () => t.bus.messages.some((m) => m.message.type === 'ENGINE_BEST_MOVE' && m.message.elo === null && t.bus.messages.indexOf(m) > t.bus.messages.findIndex((x) => x.message.elo === 1500)),
+      'a search at Full strength again',
+      5000,
+    );
+  } finally {
+    t.stop();
+  }
+});
+
 test('nothing is asked of the engine while the setting is off', async () => {
   const t = setup({ enabled: false });
   try {
@@ -348,7 +381,7 @@ test('a short game, 1.e4 c5 2.Nf3 d6, through the real chain with five lines: ar
       piece.setAttribute('data-sq', to);
       t.document.getElementById('moves').setAttribute('data-ply', String(i + 1));
       await tick(100);
-      assert.equal(t.arrow().querySelectorAll('g[data-rank]').length, 0, 'the arrows for the old position are gone at once');
+      assert.equal(t.arrow().hasAttribute('data-stale'), true, 'the arrows for the old position are faint at once, until the new answer');
       await settled(i + 2);
       const fen = positions.at(-1);
       assert.deepEqual(fen.split(' ').slice(0, 3), game.fen().split(' ').slice(0, 3), 'the engine was asked about the position on the board');
@@ -419,6 +452,28 @@ test('a position seen again is shown from the cache without asking the engine ag
     await tick(600);
     assert.equal(requests().length, 2, 'the engine was not asked about the start position a second time');
     assert.equal(t.arrowDrawn(), true);
+  } finally {
+    t.stop();
+  }
+});
+
+test('the practice strength reaches the real engine before each go, and Full strength switches the limit off again', async () => {
+  const t = setup({ elo: 1600, depth: 8, lines: 1 });
+  try {
+    await until(t.arrowDrawn, 'the first arrow');
+    const firstGo = t.commands.findIndex((c) => c.startsWith('go '));
+    assert.ok(firstGo > 0);
+    const before = t.commands.slice(0, firstGo);
+    assert.ok(before.includes('setoption name UCI_LimitStrength value true'));
+    assert.ok(before.includes('setoption name UCI_Elo value 1600'));
+
+    t.stored.elo = null;
+    for (const listener of t.storageListeners) listener({ elo: { oldValue: 1600, newValue: null } }, 'local');
+    await until(() => t.commands.filter((c) => c.startsWith('go ')).length >= 2, 'a second search', 10000);
+    const secondGo = t.commands.map((c, i) => (c.startsWith('go ') ? i : -1)).filter((i) => i >= 0)[1];
+    const between = t.commands.slice(firstGo + 1, secondGo);
+    assert.ok(between.includes('setoption name UCI_LimitStrength value false'), 'the limit is switched off before the next search');
+    assert.ok(!between.some((c) => c.startsWith('setoption name UCI_Elo')), 'no rating at Full strength');
   } finally {
     t.stop();
   }

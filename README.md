@@ -13,7 +13,7 @@ This project is not affiliated with, endorsed by or sponsored by chess.com. It i
 3. Click **Load unpacked** and pick this project folder (the one that contains `manifest.json`).
 4. Pin the extension from the puzzle-piece menu if you want the popup one click away.
 
-After editing any file in the folder, click the reload arrow on the extension's card in `chrome://extensions`.
+After editing any file in the folder, click the reload arrow on the extension's card in `chrome://extensions`. The version number on that card (for example 1.1.0) changes with each release, so it shows whether a reload picked up the new version.
 
 ## Using it
 
@@ -32,7 +32,21 @@ After editing any file in the folder, click the reload arrow on the extension's 
   - **Show suggested move**: the on/off switch. Off removes the arrows and the panel, and stops new searches from starting (a search already running finishes).
   - **Search depth**: 8 to 20, default 12. Deeper is stronger but slower. A new depth applies to the next search.
   - **Lines shown**: 1 to 5 (default 3). The engine searches that many lines (MultiPV), and each one gets an arrow and a table row.
+  - **Practice strength**: **Full strength** (the default) or an Elo between 1320 and 2800 on the slider. A set rating makes the engine play at about that strength, and the panel says so ("Practice strength: ~1500 Elo"). It is for **analysis and practice, not live rated games**. The setting applies to the next search, without a reload. 1320 is the lowest rating the bundled engine supports, so the slider starts there.
   - The note at the bottom repeats the rules above.
+
+The arrows and the panel also move smoothly: when the position changes, the old arrows fade and stay faint until the new position has its first answer, so the board doesn't flicker. New arrows fade and slide in. If your system asks for reduced motion, the arrows switch at once and the panel and popup don't animate. The live numbers in the panel update a few times a second rather than on every engine tick.
+
+## Changelog
+
+### 1.1.0
+- Smoother arrows: when the position changes, the old arrows fade and stay faint until the new position has its first answer, so the board doesn't flicker. New arrows fade and slide in.
+- Practice strength: a Full strength or Elo (1320 to 2800) setting in the popup, applied without a reload and shown in the panel. For practice against bots and analysis, not live rated games.
+- Reduced motion: the arrows, panel and popup don't animate when the system asks for reduced motion.
+- The numbers in the panel update a few times a second instead of on every engine tick.
+
+### 1.0.0
+- First public release: numbered, colour-coded arrows for up to five lines, the analysis panel, the popup, and the bundled Stockfish engine.
 
 ## Running the tests
 
@@ -93,3 +107,4 @@ Everything below was tested in Node with jsdom and fixtures, or not at all. Plea
 7. **Match pattern.** The content script matches `https://www.chess.com/*`, which is wider than the game and analysis pages. Check that it behaves sensibly on other chess.com pages.
 8. **Faster suggestions and the panel redesign.** The partial-result stream (engine to offscreen to background to tab), the depth bar, the position cache and the 150 ms debounce were tested in Node with the real engine and jsdom, not in Chrome. Check on a live page that the arrows updating several times a second don't flicker and that the 32 MB engine hash loads in the offscreen document.
 9. **Game review and opponent check.** Based on win chance from a shallow search and on positions seen one move after another; the reader's FEN fields were not checked against chess.js beyond placement and side to move.
+10. **Feel and practice strength.** The fade and slide of the arrows, the throttled panel numbers and the popup styling in light and dark modes were only checked in Node, not seen on a live page. The practice strength is sent to the bundled engine as `UCI_LimitStrength` and `UCI_Elo`. The engine's own floor for `UCI_Elo` is 1320 (checked against the bundled build's `uci` output), so the slider is 1320 to 2800. Check on a live page that a set rating visibly plays weaker and that Full strength plays at full strength again on the next search.

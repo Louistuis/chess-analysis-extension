@@ -15,6 +15,9 @@
   const PARTIAL_INTERVAL_MS = 120;
   const HASH_MB = 32;
   const SUPERSEDED = 'Search superseded by a newer position.';
+  // Practice strength range, the same as src/settings.js (the engine's own UCI_Elo floor is 1320).
+  const ELO_MIN = 1320;
+  const ELO_MAX = 2800;
 
   class Engine {
     constructor(worker, options = {}) {
@@ -134,6 +137,8 @@
       // A newer request arrived while this one waited, so its position is already out of date.
       if (options.supersede && token !== this.latestToken) throw new Error(SUPERSEDED);
       this.send('setoption name MultiPV value ' + lineCount);
+      // Sent for every search, so a change from practice strength back to Full strength (or to another Elo) applies to the next one.
+      for (const command of strengthCommands(options.elo)) this.send(command);
       this.send('position fen ' + normalized);
       this.send('go depth ' + depth);
       const run = { stopped: false };
@@ -192,6 +197,23 @@
       }
       return assemble(best, lineCount, sideToMove, result, stats, depth);
     }
+  }
+
+  // A practice strength in ELO_MIN to ELO_MAX as a whole number, or null for Full strength. Anything else is Full strength.
+  // Same rule as normalizeElo in src/settings.js.
+  function practiceElo(value) {
+    const isNumber = typeof value === 'number' || (typeof value === 'string' && value.trim() !== '');
+    if (!isNumber) return null;
+    const whole = Math.round(Number(value));
+    return Number.isFinite(whole) && whole >= ELO_MIN && whole <= ELO_MAX ? whole : null;
+  }
+
+  // The UCI commands that set the strength for one search. Full strength switches the limit off; a practice Elo switches
+  // it on and sets the rating the engine plays at (UCI_LimitStrength and UCI_Elo).
+  function strengthCommands(elo) {
+    const rating = practiceElo(elo);
+    if (rating === null) return ['setoption name UCI_LimitStrength value false'];
+    return ['setoption name UCI_LimitStrength value true', 'setoption name UCI_Elo value ' + rating];
   }
 
   // Builds the result object from the latest info of each rank. With `result` (the engine's bestmove) it is the final
@@ -331,7 +353,7 @@
     return { win: wdl.loss, draw: wdl.draw, loss: wdl.win, whitePov: true };
   }
 
-  const api = { Engine, parseInfo, statsFrom, toWhitePov, toWhitePovWdl, clampDepth, clampLines, validateFen, DEFAULT_DEPTH, MAX_LINES };
+  const api = { Engine, parseInfo, statsFrom, toWhitePov, toWhitePovWdl, clampDepth, clampLines, practiceElo, strengthCommands, validateFen, DEFAULT_DEPTH, MAX_LINES };
   scope.StockfishEngine = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

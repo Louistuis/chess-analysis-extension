@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { squareCenter, parseMove, arrowShape, arrowForMove, arrowColour, planArrows, MAX_ARROWS, SuggestionTracker } = require('../src/overlay.js');
+const { JSDOM } = require('jsdom');
+const { squareCenter, parseMove, arrowShape, arrowForMove, arrowColour, planArrows, motionFor, DIMMED_OPACITY, MAX_ARROWS, SuggestionTracker, SuggestionOverlay } = require('../src/overlay.js');
 
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
 const closePoint = (actual, expected) => {
@@ -170,6 +171,68 @@ test('lines that end on the same square get numbers pushed apart and labels on d
   closePoint(second.label, { x: f7.x + 6.25, y: f7.y + 6.25 }); // the second corner is bottom right
 });
 
+test('motion: arrows fade and slide in over 180 ms, and switch at once with reduced motion', () => {
+  assert.deepEqual(motionFor(false), { fadeMs: 180, slide: 3 });
+  assert.deepEqual(motionFor(true), { fadeMs: 0, slide: 0 });
+  assert.ok(DIMMED_OPACITY > 0 && DIMMED_OPACITY < 1, 'faded arrows are visible but faint');
+});
+
+// Runs `fn` with a jsdom board and the globals the overlay reads (document, getComputedStyle, matchMedia) set to it.
+function withBoard(reducedMotion, fn) {
+  const dom = new JSDOM('<div id="board"></div>');
+  const saved = { document: globalThis.document, getComputedStyle: globalThis.getComputedStyle, matchMedia: globalThis.matchMedia };
+  globalThis.document = dom.window.document;
+  globalThis.getComputedStyle = dom.window.getComputedStyle;
+  globalThis.matchMedia = () => ({ matches: reducedMotion });
+  try {
+    return fn(dom.window.document.getElementById('board'));
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+}
+
+test('with reduced motion the arrows are dimmed, then replaced, with no animation', () => {
+  withBoard(true, (board) => {
+    const overlay = new SuggestionOverlay();
+    overlay.attach(board);
+    overlay.show([{ move: 'e2e4', label: '+0.30', gap: 0 }], false);
+    assert.equal(overlay.svg.querySelectorAll('g[data-rank]').length, 1);
+    overlay.dim();
+    assert.equal(overlay.svg.hasAttribute('data-stale'), true);
+    assert.equal(overlay.svg.style.opacity, String(DIMMED_OPACITY));
+    assert.equal(overlay.svg.querySelectorAll('g[data-rank]').length, 1, 'the faded arrow is still drawn');
+    const hiddenTexts = [...overlay.svg.querySelectorAll('text')];
+    assert.ok(hiddenTexts.length >= 2, 'the faded arrow has its number and label');
+    assert.ok(hiddenTexts.every((t) => t.style.display === 'none'), 'but its number and score are hidden');
+    overlay.show([{ move: 'g1f3', label: '+0.10', gap: 0 }], false);
+    assert.ok([...overlay.svg.querySelectorAll('text')].every((t) => t.style.display !== 'none'), 'new numbers and scores show');
+    assert.equal(overlay.svg.hasAttribute('data-stale'), false, 'the new arrows are not faded');
+    assert.equal(overlay.svg.style.opacity, '1');
+    assert.equal(overlay.svg.querySelectorAll('g[data-rank]').length, 1, 'replaced at once, no leftovers');
+    assert.equal(overlay.svg.querySelector('g').style.opacity, '', 'no fade styles with reduced motion');
+    overlay.clear();
+    assert.equal(overlay.svg.querySelectorAll('g').length, 0);
+  });
+});
+
+test('with motion allowed a new arrow starts faint and slides in, and the old one fades out before it is removed', async () => {
+  await withBoard(false, async (board) => {
+    const overlay = new SuggestionOverlay();
+    overlay.attach(board);
+    overlay.show([{ move: 'e2e4', label: '+0.30', gap: 0 }], false);
+    overlay.show([{ move: 'g1f3', label: '+0.10', gap: 0 }], false);
+    const groups = [...overlay.svg.querySelectorAll('g[data-rank]')];
+    assert.equal(groups.length, 2, 'the old arrow is still there while it fades');
+    assert.equal(groups[0].style.opacity, '0', 'the old arrow is fading out');
+    assert.equal(groups[1].style.opacity, '0', 'the new arrow starts transparent');
+    assert.match(groups[1].style.transform, /^translate\(/, 'and offset, ready to slide in');
+    await new Promise((resolve) => setTimeout(resolve, 60)); // the next frame sets the new arrow in place
+    assert.equal(groups[1].style.opacity, '1');
+    await new Promise((resolve) => setTimeout(resolve, 200)); // the fade is over
+    assert.deepEqual([...overlay.svg.querySelectorAll('g[data-rank]')], [groups[1]], 'only the new arrow is left');
+  });
+});
+
 test('a flipped board puts the number and the label where the same squares are on the turned board', () => {
   const [plan] = planArrows([{ move: 'e2e4', label: '+0.40', gap: 0 }], true);
   closePoint(plan.badge, squareCenter('e4', true));
@@ -187,6 +250,7 @@ function harness() {
   const asked = [];
   const shown = [];
   let hides = 0;
+  let stales = 0;
   const tracker = new SuggestionTracker({
     ask: (fen) => {
       asked.push(fen);
@@ -196,9 +260,12 @@ function harness() {
     hide: () => {
       hides++;
     },
+    stale: () => {
+      stales++;
+    },
   });
   const settle = () => new Promise((resolve) => setImmediate(resolve)); // let the tracker make its requests
-  return { tracker, pending, asked, shown, settle, hides: () => hides };
+  return { tracker, pending, asked, shown, settle, hides: () => hides, stales: () => stales };
 }
 
 test('an answer for an older position is ignored when a newer one has arrived', async () => {
@@ -232,7 +299,7 @@ test('an answer for a different FEN than the one asked about is not drawn', asyn
   assert.deepEqual(h.shown, []);
 });
 
-test('the same position is not asked for twice, and the arrow is cleared when the position changes', async () => {
+test('the same position is not asked for twice, and the arrow is faded when the position changes', async () => {
   const h = harness();
   h.tracker.update('A');
   h.tracker.update('A');
@@ -241,9 +308,37 @@ test('the same position is not asked for twice, and the arrow is cleared when th
   h.pending.get('A').resolve({ ok: true, move: 'e2e4', fen: 'A' });
   await h.settle();
   assert.equal(h.shown.length, 1);
-  const before = h.hides();
+  const stalesBefore = h.stales();
+  const hidesBefore = h.hides();
   h.tracker.update('B');
-  assert.equal(h.hides(), before + 1, 'the old arrow is cleared as soon as the position changes');
+  assert.equal(h.stales(), stalesBefore + 1, 'the old arrow is faded as soon as the position changes');
+  assert.equal(h.hides(), hidesBefore, 'and it stays on the board, faint, until the new position has an answer');
+});
+
+test('when the new position has no answer, the faded arrows are removed', async () => {
+  const h = harness();
+  h.tracker.update('A');
+  await h.settle();
+  h.pending.get('A').resolve({ ok: true, move: 'e2e4', fen: 'A' });
+  await h.settle();
+  h.tracker.update('B');
+  await h.settle();
+  const hidesBefore = h.hides();
+  h.pending.get('B').reject(new Error('Engine unavailable'));
+  await h.settle();
+  assert.equal(h.hides(), hidesBefore + 1, 'a failed answer for the new position removes the old arrows');
+});
+
+test('a newer position makes an older failure harmless: only the latest position decides whether arrows are removed', async () => {
+  const h = harness();
+  h.tracker.update('A');
+  await h.settle();
+  h.tracker.update('B');
+  await h.settle();
+  const hidesBefore = h.hides();
+  h.pending.get('A').reject(new Error('late failure'));
+  await h.settle();
+  assert.equal(h.hides(), hidesBefore, 'the failure for A does not touch the arrows for B');
 });
 
 test('a failed request leaves no arrow and does not throw', async () => {

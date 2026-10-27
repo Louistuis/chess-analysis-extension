@@ -133,3 +133,68 @@ test('a stored lines value above five shows as five, and a bad one as 3', async 
   const q = await openPopup({ lines: 'many' });
   assert.equal(q.$('lines').value, '3');
 });
+
+test('the practice strength starts at Full strength, with the slider off', async () => {
+  const p = await openPopup();
+  assert.equal(p.$('elo-full').checked, true);
+  assert.equal(p.$('elo').disabled, true);
+  assert.equal(p.$('elo-value').textContent, 'Full strength');
+  assert.equal(p.$('elo').min, '1320');
+  assert.equal(p.$('elo').max, '2800');
+});
+
+test('a stored practice rating shows on the slider, with the slider on', async () => {
+  const p = await openPopup({ elo: 1900 });
+  assert.equal(p.$('elo-full').checked, false);
+  assert.equal(p.$('elo').disabled, false);
+  assert.equal(p.$('elo').value, '1900');
+  assert.equal(p.$('elo-value').textContent, '~1900 Elo');
+});
+
+test('moving the Elo slider shows the rating live, and saves it on release', async () => {
+  const p = await openPopup({ elo: 1500 });
+  p.$('elo').value = '2200';
+  p.fire(p.$('elo'), 'input');
+  assert.equal(p.$('elo-value').textContent, '~2200 Elo');
+  assert.equal(p.data.elo, 1500, 'nothing saved until the slider is released: still the stored 1500');
+  p.fire(p.$('elo'), 'change');
+  assert.equal(p.data.elo, 2200);
+});
+
+test('ticking Full strength saves null, and unticking it goes back to the last rating chosen', async () => {
+  const p = await openPopup({ elo: 1700 });
+  p.$('elo-full').checked = true;
+  p.fire(p.$('elo-full'), 'change');
+  assert.strictEqual(p.data.elo, null);
+  for (const l of p.listeners) l({ elo: { newValue: null } }, 'local');
+  assert.equal(p.$('elo').disabled, true);
+  assert.equal(p.$('elo-value').textContent, 'Full strength');
+
+  p.$('elo-full').checked = false;
+  p.fire(p.$('elo-full'), 'change');
+  assert.equal(p.data.elo, 1700, 'the rating from before comes back');
+});
+
+test('a bad or out-of-range stored practice strength shows as Full strength', async () => {
+  for (const elo of ['weak', 900, true]) {
+    const p = await openPopup({ elo });
+    assert.equal(p.$('elo-full').checked, true, `for ${String(elo)}`);
+    assert.equal(p.$('elo').disabled, true);
+  }
+});
+
+test('a change to the practice strength made elsewhere updates the controls', async () => {
+  const p = await openPopup();
+  for (const l of p.listeners) l({ elo: { newValue: 2000 } }, 'local');
+  assert.equal(p.$('elo-full').checked, false);
+  assert.equal(p.$('elo').value, '2000');
+  assert.equal(p.$('elo-value').textContent, '~2000 Elo');
+});
+
+test('the practice strength is labelled for analysis and practice, not live rated games', async () => {
+  const p = await openPopup();
+  const hint = p.dom.window.document.querySelector('.hint').textContent;
+  assert.match(hint, /for analysis and practice/);
+  assert.doesNotMatch(hint, /bots/);
+  assert.match(hint, /Not for live rated games/);
+});

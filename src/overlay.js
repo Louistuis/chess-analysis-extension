@@ -53,10 +53,11 @@
 
   // Keeps only the answer for the newest position. Older answers, and answers that arrive after the feature is turned off, are ignored.
   class SuggestionTracker {
-    constructor({ ask, show, hide }) {
+    constructor({ ask, show, hide, stale }) {
       this.ask = ask; // (fen) => Promise<{ ok, move, fen, ... }>
       this.show = show; // (result) => void
-      this.hide = hide; // () => void
+      this.hide = hide; // () => void: remove the arrows
+      this.stale = stale || (() => {}); // () => void: the arrows are for an old position; keep them faint until the answer
       this.fen = null;
       this.latest = 0;
     }
@@ -65,16 +66,18 @@
     update(fen) {
       if (fen === this.fen) return;
       this.fen = fen;
-      this.hide();
+      this.stale(); // the old arrows stay faint until this position has an answer, so the board doesn't flicker
       const id = ++this.latest;
       Promise.resolve()
         .then(() => this.ask(fen))
         .then((result) => {
           if (id !== this.latest) return; // a newer position, or the feature was turned off
           if (result && result.ok && result.fen === fen) this.show(result);
+          else this.hide(); // no answer for this position: don't leave the old arrows behind
         })
         .catch(() => {
-          // A failed request just leaves no arrow for this position.
+          // A failed request leaves no arrow for this position.
+          if (id === this.latest) this.hide();
         });
     }
 
@@ -124,6 +127,7 @@
     // and has its score label at the end square. See planArrows for where things go.
     show(arrows, flipped) {
       if (!this.svg) return;
+      const motion = motionFor(prefersReducedMotion());
       const groups = planArrows(arrows, flipped).map((plan) => {
         const group = svgNode('g', { 'data-rank': plan.number });
         const shaft = svgNode('line', {
@@ -169,14 +173,70 @@
             'paint-order': 'stroke',
           }, plan.label.text));
         }
+        if (motion.fadeMs > 0) {
+          // Starts a little behind the arrow's own direction and transparent, then slides and fades into place.
+          group.style.transition = `opacity ${motion.fadeMs}ms ease, transform ${motion.fadeMs}ms ease`;
+          group.style.opacity = '0';
+          group.style.transform = `translate(${-plan.direction.x * motion.slide}px, ${-plan.direction.y * motion.slide}px)`;
+        }
         return group;
       });
-      this.svg.replaceChildren(...groups);
+      const previous = [...this.svg.children];
+      this.svg.removeAttribute('data-stale');
+      this.svg.style.opacity = '1';
+      if (motion.fadeMs === 0) {
+        this.svg.replaceChildren(...groups);
+        return;
+      }
+      // The old arrows fade out while the new ones fade and slide in.
+      for (const old of previous) {
+        old.style.opacity = '0';
+        setTimeout(() => old.remove(), motion.fadeMs);
+      }
+      this.svg.append(...groups);
+      requestFrame(() => {
+        for (const group of groups) {
+          group.style.opacity = '1';
+          group.style.transform = 'translate(0px, 0px)';
+        }
+      });
+    }
+
+    // The arrows are for an earlier position: they stay on the board, faint, until the new position has an answer.
+    dim() {
+      if (!this.svg) return;
+      this.svg.setAttribute('data-stale', '');
+      // The numbers and score labels go too: a score on a faded arrow would read as a suggestion for the new position.
+      for (const text of this.svg.querySelectorAll('text')) text.style.display = 'none';
+      const motion = motionFor(prefersReducedMotion());
+      this.svg.style.transition = motion.fadeMs > 0 ? `opacity ${motion.fadeMs}ms ease` : 'none';
+      this.svg.style.opacity = String(DIMMED_OPACITY);
     }
 
     clear() {
-      if (this.svg) this.svg.replaceChildren();
+      if (!this.svg) return;
+      this.svg.replaceChildren();
+      this.svg.removeAttribute('data-stale');
+      this.svg.style.opacity = '1';
     }
+  }
+
+  const DIMMED_OPACITY = 0.35;
+  // How long arrows take to fade, and how far (in board units) they slide in from behind their own direction.
+  // With reduced motion they switch at once.
+  function motionFor(reduced) {
+    return reduced ? { fadeMs: 0, slide: 0 } : { fadeMs: 180, slide: 3 };
+  }
+
+  // True when the person has asked the system for less motion.
+  function prefersReducedMotion() {
+    return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  // Runs `fn` on the next frame, or after a short delay where there are no animation frames.
+  function requestFrame(fn) {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn);
+    else setTimeout(fn, 16);
   }
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -239,6 +299,7 @@
         number: index + 1,
         move: arrow.move,
         colour: arrowColour(arrow.gap),
+        direction: { x: ux, y: uy }, // unit vector from the start of the shaft to the tip
         shaft: geometry.shaft,
         head: geometry.head,
         badge: { x: tip.x - ux * back, y: tip.y - uy * back },
@@ -251,7 +312,7 @@
     });
   }
 
-  const api = { squareCenter, parseMove, arrowShape, arrowForMove, arrowColour, planArrows, MAX_ARROWS, SuggestionTracker, SuggestionOverlay };
+  const api = { squareCenter, parseMove, arrowShape, arrowForMove, arrowColour, planArrows, motionFor, MAX_ARROWS, DIMMED_OPACITY, SuggestionTracker, SuggestionOverlay };
   scope.ChessOverlay = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
